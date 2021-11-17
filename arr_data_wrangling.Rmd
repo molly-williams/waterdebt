@@ -1,0 +1,393 @@
+---
+title: "Arrearages data wrangling"
+author: "Molly Williams"
+date: "10/26/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Load data
+
+```{r}
+
+library(tidyverse)
+library(here)
+library(openxlsx)
+
+survey_data <- read_csv(here("master_tracker.csv"))
+# data from original survey 
+# already removed data for ~700 systems that do not charge for water
+
+DACs <- read_csv(here("DACs.csv")) %>% # from Tien's original exploration
+  select(PWSID, `DAC_status`)
+
+outreach <- read_csv(here("outreach_data.csv")) # download from "OPP Arrearages Correspondence" spreadsheet on SP, only save these columns (updated 11/12)
+
+replace_emails <- read_csv(here("bounced_email.csv")) # emails that were undeliverable (Oct outreach)
+
+survey_1A <- read_csv(here("1A_status.csv")) # combined into one spreadsheet and updated 11/12
+
+#started_1A <- read_csv(here("1A_started.csv")) # updated 10/12 - from arrearage page download
+# updated on 11/1 but the numbers don't make sense, so going to continue to use this one 
+
+#submitted_1A <- read_csv(here("1A_submitted.csv")) # updated 10/29 -from "Survey 1A Status" excel file sent from Jennifer Toney
+
+eligible <- read_csv(here("app_eligibility.csv")) # updated 10/29 - from "DIT Only - Application Survey 2 List" excel file from Jennifer Toney
+
+started_app <- read_csv(here("app_started.csv")) %>% # updated 11/12 - from David 
+  select(PWSID
+         #, funds_disbursed = "Fund Disbursed"
+         ) %>% 
+  mutate(app_started = "Yes")
+
+submitted_app <- read_csv(here("app_submitted.csv")) %>% #updated 11/15 - comes from exported dashboard data; rename columns and add additional for completed
+  mutate(app_complete = "Yes") %>% 
+  select(PWSID = "Water System No.", 
+  #       sys_name = "Water System Name", 
+  #       county = "County",
+         app_service_cxns = "Total Number of Service Connections", 
+         app_complete, 
+         total_arr_reported = "Total Reported Arrearages", 
+         date_submitted = "Completed on", 
+         app_ac_name = "AC Name", 
+         app_ac_email = "AC Email", 
+         app_ac_phone = "AC Phone",
+         agg_app = "Aggregated Application",
+         agg_pwsids = "Aggregated PWSIDs",
+         total_req = "Total Funding Request")
+
+# Add "CA" string to begining of PWSID numeric string so that it matches other PWSID data
+submitted_app$PWSID <- sub("^", "CA", submitted_app$PWSID)
+
+
+
+```
+
+
+
+# Join data
+
+```{r}
+
+all_program_data <- left_join(survey_data, DACs, by="PWSID") %>% 
+  left_join(outreach, by="PWSID") %>% 
+  left_join(survey_1A, by="PWSID") %>% 
+#  left_join(started_1A, by="PWSID") %>% 
+#  left_join(submitted_1A, by="PWSID") %>% 
+  left_join(eligible, by="PWSID") %>% 
+  left_join(started_app, by="PWSID") %>% 
+  left_join(submitted_app, by="PWSID") 
+
+
+# create separate rows for water systems in aggregated applications
+agg <- all_program_data %>% 
+  select(!PWSID) %>% 
+  filter(agg_app=="Yes") %>% 
+  mutate(agg_pwsids_app = agg_pwsids) %>% 
+  separate_rows(agg_pwsids) %>% 
+  mutate(PWSID = agg_pwsids) %>% 
+  mutate(agg_pwsids = agg_pwsids_app) %>% 
+  select(!agg_pwsids_app) %>% 
+  filter(str_detect(PWSID, "")) # remove line for blank PWSID
+
+
+
+#bind back together with submitted app data
+all_program_data <- rbind(all_program_data, agg)
+
+
+
+
+# remove duplicates
+
+# removes all of the umbrella systems that submitted agg apps
+all_program_data <- all_program_data %>% 
+  distinct()
+
+# Filter rows for duplicated PWSIDs from agg apps
+dupes <- all_program_data %>%
+  group_by(PWSID) %>%
+  filter(n()>1) %>%  # keep both rows that are duplicated
+  filter(app_complete == "Yes")
+
+rm_pwsids <- dupes$PWSID  
+
+# remove PWSIDs that match dupes 
+all_program_data <- all_program_data[ ! all_program_data$PWSID %in% rm_pwsids, ]
+
+# add the dupes back in :) 
+all_program_data <- rbind(dupes, all_program_data)
+
+
+
+
+# Update app_started and app_complete columns, accounting for lag time with updated data for who has started app but not completed it
+
+all_program_data <- all_program_data %>%
+  mutate(app_complete = 
+           ifelse(!is.na(app_complete), app_complete,
+                  ifelse(app_started == "Yes", "No"))) %>% 
+  mutate(app_started =
+           ifelse(app_complete =="Yes", "Yes", app_started))
+  
+
+
+# update service connection data to reflect value in submitted apps/survey 1A 
+
+
+all_program_data <- all_program_data %>% 
+  mutate(service_cxns_update = # make new column
+           ifelse(!is.na(app_service_cxns), app_service_cxns, service_cxns)
+         ) %>% 
+  select(!service_cxns) %>% 
+  select(!app_service_cxns) #remove unnecessary service connection columns
+  
+
+#all_program_data <- all_program_data %>% 
+#  mutate(service_cxns_update = # make new column
+#           ifelse(!is.na(app_service_cxns), app_service_cxns,
+#                  ifelse(is.na(survey1A_service_cxns), service_cxns, survey1A_service_cxns
+#                  )
+#         )
+#  ) %>% 
+#  select(!service_cxns) %>% 
+#  select(!survey1A_service_cxns) %>% 
+#  select(!app_service_cxns) #remove unnecessary service connection columns
+  
+
+
+# discrepancy in connection # data (and potentially contact names)
+
+#service_cxns <- all_program_data %>% 
+#  select(PWSID, service_cxns, app_service_cxns, service_cxns_update)
+
+
+
+# compile declared need data
+
+#all_program_data <- all_program_data %>% 
+#  mutate(program_need_update = # make new column
+#           ifelse(is.na(survey1A_prog_need), program_need, survey1A_prog_need
+#         )
+#  )
+
+all_program_data <- all_program_data %>% 
+  mutate(program_need_update = 
+           ifelse(app_complete == "Yes", "Yes", program_need)
+         )
+
+# if they submitted an application, then change program_need_update to yes
+
+# will update this once we get the updated survey 1A data for program need ^^
+
+
+
+
+# update contacts, update to survey reporter for emails that bounced
+
+
+# update contacts based on most recent data from survey/app
+all_program_data <- all_program_data %>% 
+  mutate(ac_name_update = # make new column
+           ifelse(is.na(app_ac_name), ac_name, app_ac_name)
+         ) %>% 
+  mutate(ac_email_update = 
+           ifelse(is.na(app_ac_email), ac_email, app_ac_email)
+         ) %>% 
+  mutate(ac_phone_update =  
+           ifelse(is.na(app_ac_phone), ac_phone, app_ac_phone)
+          )
+
+
+
+# replace contacts with undeliverable email addresses
+
+
+all_program_data <- all_program_data %>% 
+  left_join(replace_emails, by="PWSID") %>% 
+  select(!ac_name_orig) %>% 
+  select(!ac_email_orig) %>% 
+  mutate(ac_name_update =
+           ifelse(is.na(bounced_email), ac_name_update, alt_name)) %>% 
+  mutate(ac_email_update = 
+           ifelse(is.na(bounced_email), ac_email_update, alt_email)) %>% 
+  mutate(ac_phone_update =
+           ifelse(is.na(bounced_email), ac_phone_update, alt_phone))
+
+
+
+
+
+# filter relevant data for tracking
+tracker <- all_program_data %>% 
+  select(PWSID, 
+         sys_name,
+         agency,
+         county,
+         service_cxns_update,
+         DAC_status,
+         survey_start,
+         survey_submit,
+         survey1A_start,
+         survey1A_submitted,
+         app_started,
+         app_complete,
+         program_need_update,
+         contact_priority,
+         opp_contact_date,
+         follow_up_date, 
+         total_arr_reported,
+#         funds_disbursed,
+         ac_name_update, 
+         ac_email_update,
+         ac_phone_update,
+         agg_reporting, 
+         agg_PWSID, 
+         umbrella_org, 
+         survey_PWSIDs, 
+         TA_requested, 
+         reporter_name, 
+         reporter_email, 
+         reporter_phone
+         )
+
+# format data for public distribution
+
+public_data <- all_program_data %>% 
+  mutate(app_complete = 
+           ifelse(is.na(app_complete), "No",
+                  ifelse(app_complete=="Y", "Yes", app_complete))
+         ) %>% 
+    mutate(ac_email_update =
+           ifelse(ac_email_update==0, NA, ac_email_update)) %>% 
+  mutate(ac_phone_update =
+           ifelse(ac_phone_update==0, NA, ac_phone_update)) %>% 
+  mutate(program_need_update = 
+           ifelse(is.na(program_need_update), "Did not complete survey", program_need_update)) %>% 
+  select("Water System ID # (PWSID)"=PWSID, 
+         "System Name" = sys_name, 
+         "County"=county, 
+         "# of Service Connections" = service_cxns_update, 
+         "Intend to apply?" = program_need_update, 
+         "Application complete?" = app_complete,
+  #       "Funds disbursed?" = funds_disbursed,
+         "Contact name" = ac_name_update, 
+         "Contact email" = ac_email_update, 
+         "Contact phone"=ac_phone_update)
+
+
+  
+  
+public_data$County <- str_to_title(public_data$County)
+public_data$'Contact name' <- str_to_title(public_data$'Contact name')
+public_data$'Contact phone' <- str_replace_all(public_data$'Contact phone', "EXT. ", " x")
+
+
+public_data <- public_data[order(public_data$County),]
+
+
+```
+
+
+# Export files 
+
+```{r}
+
+today <- Sys.Date()
+
+csv_filename <- paste0(today,"_arrearage data tracker.csv")
+
+excel_filename <- paste0(today,"_arrearage data tracker.xlsx")
+
+
+write_csv(tracker, here(csv_filename))
+
+write.xlsx(tracker, here(excel_filename))
+
+
+public_filename <-  paste0("Public Arrearage Program Data_", today, ".xlsx")
+write.xlsx(public_data, here(public_filename))
+
+
+```
+
+
+# Mapping!
+
+```{r}
+library(sf)
+library(tmap)
+library(leaflet)
+library(ggrepel)
+library(ggspatial)
+library(RColorBrewer)
+library(raster)
+
+
+ca_counties <- read_sf(".", layer = "california_county_shape_file")
+
+st_crs(ca_counties) = 4326
+
+plot(ca_counties[1])
+
+
+# filter for apps that have been submitted 
+app_by_county <- all_program_data %>% 
+  dplyr::select(county, program_need_update, app_complete) %>% 
+  dplyr::filter(app_complete == "Yes") %>% 
+  dplyr::mutate(NAME=str_to_title(county)) %>% 
+  dplyr::select(!county)
+
+app_by_county <- app_by_county %>% 
+  group_by(NAME) %>% 
+  tally() %>% 
+  dplyr::select(NAME, applied=n)
+
+
+# filter for total that indicated need 
+systems_by_county <- all_program_data %>% 
+  dplyr::select(county, program_need_update, app_complete) %>% 
+  filter(program_need_update == "Yes") %>% 
+  group_by(county) %>% 
+  tally() %>% 
+  mutate(NAME=str_to_title(county)) %>% 
+  dplyr::select(NAME, total=n)
+
+
+pct_by_county <- app_by_county %>% 
+  left_join(systems_by_county, by="NAME") %>% 
+  mutate(pct = (applied/total)*100)
+
+
+
+ca_counties_apps <- ca_counties %>% 
+  left_join(pct_by_county, by="NAME") %>% 
+  mutate_all(~replace(., is.na(.), 0)) # replace zeroes with NA
+
+
+plot(ca_counties_apps[3])
+
+
+int_map <-tm_shape(ca_counties_apps) +
+  tm_fill("pct", palette = "BuGn", alpha = 0.5) +
+ # tm_shape(ca_counties) + 
+  tm_borders()
+
+tmap_mode("view")
+int_map
+
+
+# static ggplot
+ggplot() +
+  geom_sf(data =ca_counties_apps, aes(fill = pct), size = 0.2) +
+  theme_minimal() +
+  scale_fill_continuous(low = "yellow", high = "red")
+
+```
+
+
+
