@@ -18,18 +18,22 @@ library(tidyverse)
 library(here)
 library(openxlsx)
 
+
+  
+
 survey_data <- read_csv(here("master_tracker.csv"))
 # data from original survey 
 # already removed data for ~700 systems that do not charge for water
 
-DACs <- read_csv(here("DACs.csv")) %>% # from Tien's original exploration
-  select(PWSID, `DAC_status`)
+#DACs <- read_csv(here("DACs.csv")) %>% # from Tien's original exploration
+#  select(PWSID, `DAC_status`)
+# no longer need because survey data received 11/30 has DAC status for all systems
 
-outreach <- read_csv(here("outreach_data.csv")) # download from "OPP Arrearages Correspondence" spreadsheet on SP, only save these columns (updated 11/12)
+outreach <- read_csv(here("outreach_data.csv")) # download from "OPP Arrearages Correspondence" spreadsheet on SP, only save these columns (updated 12/1)
 
 replace_emails <- read_csv(here("bounced_email.csv")) # emails that were undeliverable (Oct outreach)
 
-survey_1A <- read_csv(here("1A_status.csv")) # combined into one spreadsheet and updated 11/12
+survey_1A <- read_csv(here("1A_status.csv")) # combined into one spreadsheet and updated 11/30
 
 #started_1A <- read_csv(here("1A_started.csv")) # updated 10/12 - from arrearage page download
 # updated on 11/1 but the numbers don't make sense, so going to continue to use this one 
@@ -38,13 +42,13 @@ survey_1A <- read_csv(here("1A_status.csv")) # combined into one spreadsheet and
 
 eligible <- read_csv(here("app_eligibility.csv")) # updated 10/29 - from "DIT Only - Application Survey 2 List" excel file from Jennifer Toney
 
-started_app <- read_csv(here("app_started.csv")) %>% # updated 11/12 - from David 
-  select(PWSID
+started_app <- read_csv(here("app_started.csv")) %>% # updated 11/30 - from David 
+  select(PWSID = PwsID
          #, funds_disbursed = "Fund Disbursed"
          ) %>% 
   mutate(app_started = "Yes")
 
-submitted_app <- read_csv(here("app_submitted.csv")) %>% #updated 11/15 - comes from exported dashboard data; rename columns and add additional for completed
+submitted_app <- read_csv(here("app_submitted.csv")) %>% #updated 11/30 - comes from exported dashboard data; rename columns and add additional for completed
   mutate(app_complete = "Yes") %>% 
   select(PWSID = "Water System No.", 
   #       sys_name = "Water System Name", 
@@ -63,6 +67,15 @@ submitted_app <- read_csv(here("app_submitted.csv")) %>% #updated 11/15 - comes 
 # Add "CA" string to begining of PWSID numeric string so that it matches other PWSID data
 submitted_app$PWSID <- sub("^", "CA", submitted_app$PWSID)
 
+arrear_amounts_dacs <- read_csv(here("arrear_amounts_dac_status.csv")) %>%  # sent by Will Allen on 11/30
+  select(PWSID = "PWSID - SDWIS", 
+         pop = "Population - SDWIS",
+         req_funding = "Requested Funding Amt - Q29",
+         adjusted_arrears = "Total Adjusted Estimated Arrears",
+         DAC_status = "Disadvantaged Community Status",
+         survey_comments = "FundReqComments - Q30") %>% 
+    drop_na(PWSID)
+
 
 
 ```
@@ -73,7 +86,7 @@ submitted_app$PWSID <- sub("^", "CA", submitted_app$PWSID)
 
 ```{r}
 
-all_program_data <- left_join(survey_data, DACs, by="PWSID") %>% 
+all_program_data <- left_join(arrear_amounts_dacs, survey_data, by="PWSID") %>% 
   left_join(outreach, by="PWSID") %>% 
   left_join(survey_1A, by="PWSID") %>% 
 #  left_join(started_1A, by="PWSID") %>% 
@@ -126,13 +139,18 @@ all_program_data <- rbind(dupes, all_program_data)
 
 
 # Update app_started and app_complete columns, accounting for lag time with updated data for who has started app but not completed it
-
+# I probably have too much code here but too lazy to reduce it!
 all_program_data <- all_program_data %>%
   mutate(app_complete = 
            ifelse(!is.na(app_complete), app_complete,
                   ifelse(app_started == "Yes", "No"))) %>% 
+  
   mutate(app_started =
-           ifelse(app_complete =="Yes", "Yes", app_started))
+           ifelse(app_complete =="Yes", "Yes", app_started)) %>% 
+  mutate(app_started = 
+           ifelse(is.na(app_started), "No", app_started)) %>% 
+  mutate(app_complete =
+           ifelse(app_started =="No", "No", app_complete))
   
 
 
@@ -228,10 +246,14 @@ tracker <- all_program_data %>%
          sys_name,
          agency,
          county,
+         pop,
          service_cxns_update,
          DAC_status,
          survey_start,
          survey_submit,
+         survey_req_funding = req_funding,
+         survey_adj_arrears = adjusted_arrears,
+         survey_comments,
          survey1A_start,
          survey1A_submitted,
          app_started,
@@ -270,8 +292,9 @@ public_data <- all_program_data %>%
            ifelse(is.na(program_need_update), "Did not complete survey", program_need_update)) %>% 
   select("Water System ID # (PWSID)"=PWSID, 
          "System Name" = sys_name, 
-         "County"=county, 
-         "# of Service Connections" = service_cxns_update, 
+         "County"=county,
+         "Population (may represent system that submitted aggregate application)" = pop,
+         "# of Service Connections (may represent system that submitted aggregate application)" = service_cxns_update, 
          "Intend to apply?" = program_need_update, 
          "Application complete?" = app_complete,
   #       "Funds disbursed?" = funds_disbursed,
@@ -313,10 +336,44 @@ public_filename <-  paste0("Public Arrearage Program Data_", today, ".xlsx")
 write.xlsx(public_data, here(public_filename))
 
 
+
+
 ```
 
 
-# Mapping!
+# Contact info wrangling
+
+```{r}
+#ola <- read_csv(here("OLA_arrearage contact priorities.csv"))
+#nov30 <- read_csv(here("nov30_contact.csv"))
+
+#ola2 <- ola %>% 
+#  left_join(nov30, by="PWSID")
+
+#write_csv(ola2, here("OLA.csv"))
+
+
+ola <- read_csv(here("OLA_arrearage contact priorities.csv")) %>% 
+  select(PWSID,
+         followup_3 = "Follow up date")
+
+outreach <- outreach %>% 
+  left_join(ola, by="PWSID") %>% 
+  mutate(follow_up_date =
+           ifelse(!is.na(follow_up_date), follow_up_date, 
+                  ifelse(!is.na(followup_3), followup_3, follow_up_date)
+                  )
+         ) %>% 
+  select(-followup_3)
+
+
+write_csv(outreach, here("outreach_data.csv"))
+
+
+```
+
+
+# County mapping
 
 ```{r}
 library(sf)
@@ -328,7 +385,7 @@ library(RColorBrewer)
 library(raster)
 
 
-ca_counties <- read_sf(".", layer = "california_county_shape_file")
+ca_counties <- read_sf("geospatial", layer = "california_county_shape_file")
 
 st_crs(ca_counties) = 4326
 
@@ -389,5 +446,82 @@ ggplot() +
 
 ```
 
+# Heat mapping
+```{r}
+
+library(sf)
+library(ggmap)
+library(RColorBrewer)
+
+
+points_no_app <- read_csv(here("geospatial/Have Not Applied.csv")) %>% 
+  mutate(PWSID = WSN)
+
+points_yes_app <- read_csv(here("geospatial/Completed Applications.csv")) %>%
+  mutate(PWSID = WSN) %>% 
+  filter(longitude<(-90))
+
+# add CA to beginning of PWSID
+points_no_app$PWSID <- sub("^", "CA", points_no_app$PWSID)
+
+points_yes_app$PWSID <- sub("^", "CA", points_yes_app$PWSID)
+
+# convert data frames to sf objects
+sf_no <- st_as_sf(points_no_app, coords = c("latitude", "longitude"))
+st_crs(sf_no) = 4326
+
+sf_yes <- st_as_sf(points_yes_app, coords = c("latitude", "longitude"))
+
+map_bounds <- c(left = 32, bottom = (-124), right = 42, top = (-114))
+
+# map
+ggplot() +
+  geom_sf(data = sf_no) +
+  ggtitle("Map of No App Locations")
+
+ggplot() +
+  geom_sf(data = sf_yes) +
+  ggtitle("Map of No App Locations")
+
+
+
+# heat map
+
+# basic heatmap
+ggplot() +
+  stat_density2d(data = points_no_app, aes(x = longitude, y = latitude, fill = ..density..), geom = 'tile', contour = F) 
+
+# get basemap
+
+
+get_map(location = c(lon = -95.3632715, lat = 29.7632836),
+        zoom = "auto", 
+        scale = "auto", 
+        maptype ="toner-lite", 
+        source = "stamen",
+        force = ifelse(source == "google", TRUE, FALSE),
+        messaging = FALSE,
+        urlonly = FALSE, 
+        filename = NULL, 
+        crop = TRUE)
+
+ggmap(ca_counties)
+
+
+getmap(c(-77.04, 38.89))
+#set the zoom
+getmap(c(-77.04, 38.89),zoom=14)
+#setmapbox map
+getmap(c(-77.04, 38.89),mapbox="examples.map-vyofok3q")
+#set extent for ggmap
+getmap(c(-77.04, 38.89),mapbox="examples.map-vyofok3q",extent='devise')
+#add markers to the map
+marker = c(size='m',icon='a',latlng='-77,38')
+markers = list(marker)
+getmap(c(-77.04, 38.89),mapbox="examples.map-vyofok3q",markers=markers)
+
+
+
+```
 
 
